@@ -18,10 +18,10 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 PLUGIN_HEADER_RE = re.compile(r"^\s*(\d+)\s*\((\d+)\)\s*-\s*(.+?)\s*$")
 TOGGLE_RE = re.compile(r"toggleSection\('(id\d+-container)'\)")
 SEVERITY_ORDER = {
-    "#DD4B50": 0,  # critical (red)
-    "#F18C43": 1,  # high (orange)
-    "#F8C851": 2,  # medium (yellow)
-    "#8b9a39": 3,  # low (green) - placeholder
+    "#91243E": 0,  # critical (dark red)
+    "#DD4B50": 1,  # high (red)
+    "#F18C43": 2,  # medium (orange)
+    "#F8C851": 3,  # low (yellow)
     "#67ACE1": 4,  # info (blue)
 }
 
@@ -144,6 +144,8 @@ def main():
     p.add_argument("-ff", "--folder", required=True, help="Folder containing .html Nessus reports")
     p.add_argument("-o", "--output", required=True, help="Output merged HTML file")
     p.add_argument("--title", default=None, help="Title for merged report (default: 'Merged Nessus Report')")
+    p.add_argument("--validate", action="store_true",
+                   help="Validate per-severity counts: input (deduped union) vs output")
     args = p.parse_args()
 
     folder = Path(args.folder)
@@ -177,6 +179,10 @@ def main():
     base_title = None
     base_date = None
     source_titles = []
+    # severity → {(pid, host_key)} across all inputs, deduped — used by --count
+    input_findings = {0: set(), 1: set(), 2: set(), 3: set(), 4: set(), 99: set()}
+    # Per-file plugin counts per severity (raw, undeduped), printed by --count
+    per_file_counts = []
 
     for idx, path in enumerate(html_files):
         with open(path, "rb") as f:
@@ -198,8 +204,13 @@ def main():
         else:
             source_titles.append(path.name)
 
+        file_sev_counts = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 99: 0}
         for header, container, pid, count, title in find_plugin_sections(soup):
             pre, entries = extract_host_entries(container)
+            sev = severity_key(header)
+            file_sev_counts[sev if sev in file_sev_counts else 99] += len(entries)
+            for host_key, _ in entries:
+                input_findings[sev if sev in input_findings else 99].add((pid, host_key))
 
             if pid not in plugins:
                 plugins[pid] = {
@@ -232,6 +243,8 @@ def main():
                     continue
                 remediation_keys.add(action_text)
                 remediation_rows.append(deepcopy(tr))
+
+        per_file_counts.append((path.name, file_sev_counts))
 
     # Now build the output document, using base_soup as the template
     out_soup = base_soup
@@ -467,6 +480,81 @@ def main():
     total_hosts = sum(len(p['host_order']) for p in plugins.values())
     print(f"    Total host-vulnerability rows: {total_hosts}", file=sys.stderr)
     print(f"    Remediation actions: {len(remediation_rows)}", file=sys.stderr)
+
+    # Severity breakdown (plugin count + host-vulnerability row count)
+    sev_labels = {0: "Critical", 1: "High", 2: "Medium", 3: "Low", 4: "Info", 99: "Unknown"}
+    sev_plugins = {k: 0 for k in sev_labels}
+    sev_hosts = {k: 0 for k in sev_labels}
+    for info in plugins.values():
+        sev = info["severity"] if info["severity"] in sev_labels else 99
+        sev_plugins[sev] += 1
+        sev_hosts[sev] += len(info["host_order"])
+    print("    Severity breakdown:", file=sys.stderr)
+    for sev in (0, 1, 2, 3, 4, 99):
+        if sev_plugins[sev] == 0 and sev == 99:
+            continue
+        print(
+            f"      {sev_labels[sev]:>8}: {sev_plugins[sev]:>4} plugin(s),"
+            f" {sev_hosts[sev]:>5} host-vulnerability row(s)",
+            file=sys.stderr,
+        )
+
+    # --validate: check input-union vs output by (plugin_id, host_key) per severity
+    if args.validate:
+        print("[+] Validation (input union vs output)", file=sys.stderr)
+
+        # Per-file raw breakdown (informational)
+        print("    Per-file host-vulnerability rows:", file=sys.stderr)
+        header = (
+            f"      {'File':<48} "
+            + " ".join(f"{sev_labels[s]:>8}" for s in (0, 1, 2, 3, 4))
+            + f" {'Total':>8}"
+        )
+        print(header, file=sys.stderr)
+        for fname, counts in per_file_counts:
+            total = sum(counts.values())
+            row = (
+                f"      {fname:<48} "
+                + " ".join(f"{counts[s]:>8}" for s in (0, 1, 2, 3, 4))
+                + f" {total:>8}"
+            )
+            print(row, file=sys.stderr)
+
+        # Output set (deduped, as written) by (pid, host_key)
+        output_findings = {0: set(), 1: set(), 2: set(), 3: set(), 4: set(), 99: set()}
+        for pid, info in plugins.items():
+            sev = info["severity"] if info["severity"] in output_findings else 99
+            for host_key in info["host_order"]:
+                output_findings[sev].add((pid, host_key))
+
+        print("    Input union vs output (deduped, by plugin_id + host):", file=sys.stderr)
+        all_match = True
+        for sev in (0, 1, 2, 3, 4, 99):
+            inp = input_findings[sev]
+            out = output_findings[sev]
+            if not inp and not out:
+                continue
+            missing = inp - out
+            extra = out - inp
+            ok = not missing and not extra
+            mark = "✓" if ok else "✗"
+            print(
+                f"      {sev_labels[sev]:>8}: input={len(inp):>5}  output={len(out):>5}  {mark}",
+                file=sys.stderr,
+            )
+            if not ok:
+                all_match = False
+                if missing:
+                    sample = sorted(missing)[:3]
+                    print(f"        missing from output ({len(missing)}): {sample}", file=sys.stderr)
+                if extra:
+                    sample = sorted(extra)[:3]
+                    print(f"        extra in output ({len(extra)}): {sample}", file=sys.stderr)
+        if all_match:
+            print("    Result: all (plugin_id, host) tuples accounted for ✓", file=sys.stderr)
+        else:
+            print("    Result: MISMATCH — see details above ✗", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":
