@@ -1,9 +1,11 @@
 # nessus-scope-extract
 
-Two utilities for working with Nessus HTML reports:
+Four utilities for working with Nessus reports:
 
 - **`scope-extract.py`** — extract Service Detection `ip:port` pairs for recon piping.
-- **`rpt-html-merge.py`** — merge multiple Nessus HTML reports into a single consolidated report.
+- **`rpt-html-merge.py`** — merge multiple Nessus HTML reports into one consolidated report.
+- **`auto-report.py`** — generate a styled `.docx` vulnerability report from a Nessus HTML report.
+- **`csv-combine.py`** — combine Nessus CSV exports into a single deduped Excel workbook.
 
 ---
 
@@ -132,11 +134,134 @@ Open `merged.html` in a browser — collapsible plugin sections, severity colors
 - The first report is used as the document shell — its banner, CSS, and surrounding metadata become the template; only the title and date subtitle are rewritten.
 - Severity ordering is driven by the header background color in the source HTML. Unrecognized colors sort last.
 
+---
+
+## `auto-report.py`
+
+Generate a `.docx` vulnerability report from a single Nessus HTML report. Output mimics the in-house template under `doc-report/` — Montserrat Semi Bold headings, Lato body, Share Tech Mono code blocks. Findings are grouped into **Critical / High / Medium / Low Risk Findings**; Info is skipped.
+
+For each finding the report emits:
+
+- **Description** — synopsis sentence prepended to the plugin description.
+- **Plugin Output** — first non-empty per-host output, rendered as a code block.
+- **Affected Assets** — every host header from the source plugin, as code blocks.
+- **Recommendation** — Nessus's Solution text, rewritten to start with "We recommend …" (imperative verb → gerund: `Upgrade` → `upgrading`, `Disable` → `disabling`, etc.).
+- **Vulnerability Reference** — CVEs pulled from References / See Also, deduped and sorted by year then number.
+
+Severity is taken from the plugin's **Risk Factor** field, falling back to the header background color (`#91243E` Critical, `#DD4B50` High, `#F18C43` Medium, `#F8C851` Low). Duplicate titles within the same severity bucket are dropped.
+
+### Usage
+
+```bash
+python3 auto-report.py -f nessus-report.html -o output.docx
+
+# override the styling template
+python3 auto-report.py -f nessus-report.html -o output.docx \
+    --template ./doc-report/custom-template.docx
+```
+
+Arguments:
+
+| flag | description |
+|---|---|
+| `-f`, `--file` | Input Nessus HTML report. |
+| `-o`, `--output` | Output `.docx` file. |
+| `--template` | Template `.docx` used for fonts/styles (default: `doc-report/rpt.ysh-internal-assets-va-scan.20260610.docx`). |
+
+### Example
+
+```
+$ python3 auto-report.py -f scan.html -o findings.docx
+[+] Parsing scan.html
+    Critical: 3 finding(s)
+        High: 12 finding(s)
+      Medium: 41 finding(s)
+         Low: 7 finding(s)
+       Total: 63 finding(s)
+[+] Wrote findings.docx
+```
+
+### Notes & limitations
+
+- The template `.docx` must define styles `Heading 1`–`Heading 4`, `Normal`, `List Paragraph`, and `k-code-block`, plus numbering `numId=10` (bullet list). The default template in `doc-report/` already does.
+- Info-severity findings are skipped by design.
+- One representative per-host plugin output is included per finding; if you need every host's raw output, parse from the source HTML directly.
+
+---
+
+## `csv-combine.py`
+
+Combine multiple Nessus CSV exports into a single styled Excel workbook. Severity-tinted Risk cells, frozen header, auto-filter, an extra "Pentest Require" column (defaults to `No`, red bold) for triage tracking.
+
+Modes:
+
+- **default** — dedupe rows by `Host + Protocol + Port + Name`. CVEs from duplicate rows are merged and sorted.
+- **`--no-dedupe`** — keep every row as-is.
+- **`--depend-title`** — collapse rows sharing the same `Name`; `Host`, `Port`, and `Protocol` become comma-separated lists. Useful for a per-plugin overview.
+
+Rows are sorted Critical → High → Medium → Low → Info, then by host, then port, then name.
+
+### Usage
+
+```bash
+# default — dedupe by Host+Protocol+Port+Name
+python3 csv-combine.py -ff ./reports -o findings.xlsx
+
+# keep every raw row
+python3 csv-combine.py -ff ./reports -o findings.xlsx --no-dedupe
+
+# collapse to one row per plugin name
+python3 csv-combine.py -ff ./reports -o findings.xlsx --depend-title
+```
+
+Arguments:
+
+| flag | description |
+|---|---|
+| `-ff`, `--folder` | Folder containing `.csv` Nessus reports (searched recursively). |
+| `-o`, `--output` | Output `.xlsx` file. |
+| `--no-dedupe` | Keep every row (default is dedupe by Host+Protocol+Port+Name). |
+| `--depend-title` | Collapse rows sharing the same Name; Host/Port/Protocol aggregated. |
+
+`--no-dedupe` and `--depend-title` are mutually exclusive.
+
+### Example
+
+```
+$ python3 csv-combine.py -ff ./reports -o findings.xlsx
+[+] Reading 3 CSV file(s) from reports
+    - network-01.csv: 412 row(s)
+    - network-02.csv: 380 row(s)
+    - server-01.csv: 297 row(s)
+[+] Wrote findings.xlsx
+    Total findings: 684
+    Mode: default (deduped by Host+Protocol+Port+Name)
+```
+
+### Output columns
+
+`CVE`, `Risk`, `Host`, `Protocol`, `Port`, `Name`, `Synopsis`, `Description`, `Solution`, `Risk Factor`, `Pentest Require`.
+
+### Notes & limitations
+
+- Column lookup is case- and whitespace-insensitive, but the source CSV must use Nessus's standard column names (`Host`, `Port`, `Risk`, etc.).
+- Cell contents are capped at Excel's 32,767-character limit and suffixed `...[truncated]` if longer.
+- `Risk Factor` falls back to a regex over the `Description` field when the column is missing.
+- Rows with an empty `Host` are dropped.
+
+---
+
 ## Requirements
 
 - **`scope-extract.py`** — Python 3.7+, stdlib only.
-- **`rpt-html-merge.py`** — Python 3.7+, plus `beautifulsoup4` and `lxml`:
+- **`rpt-html-merge.py`** — Python 3.7+, plus `beautifulsoup4` and `lxml`.
+- **`auto-report.py`** — Python 3.7+, plus `beautifulsoup4`, `lxml`, and `python-docx`.
+- **`csv-combine.py`** — Python 3.7+, plus `openpyxl`.
 
 ```bash
-pip install beautifulsoup4 lxml
+pip install beautifulsoup4 lxml python-docx openpyxl
 ```
+
+## License
+
+MIT
