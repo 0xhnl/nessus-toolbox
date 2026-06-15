@@ -150,7 +150,7 @@ def main():
     if not folder.is_dir():
         sys.exit(f"Folder not found: {folder}")
 
-    html_files = sorted(folder.glob("*.html"))
+    html_files = sorted(folder.rglob("*.html"))
     if not html_files:
         sys.exit(f"No .html files in {folder}")
 
